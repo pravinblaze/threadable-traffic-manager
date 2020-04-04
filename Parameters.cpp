@@ -140,11 +140,8 @@ double Parameters::GetSynchronousModeTimeOutInMiliSecond() const {
   return synchronous_time_out.count();
 }
 
-float Parameters::GetVehicleTargetVelocity(const ActorId &actor_id) const {
+float Parameters::GetVehicleTargetVelocity(const ActorId &actor_id, const float speed_limit) const {
 
-  const ActorId actor_id = actor->GetId();
-  const auto vehicle = boost::static_pointer_cast<cc::Vehicle>(actor);
-  const float speed_limit = vehicle->GetSpeedLimit();
   float percentage_difference = global_percentage_difference_from_limit;
 
   if (percentage_difference_from_speed_limit.Contains(actor_id)) {
@@ -154,10 +151,8 @@ float Parameters::GetVehicleTargetVelocity(const ActorId &actor_id) const {
   return speed_limit * (1.0f - percentage_difference / 100.0f);
 }
 
-bool Parameters::GetCollisionDetection(const ActorPtr &reference_actor, const ActorPtr &other_actor) const {
+bool Parameters::GetCollisionDetection(const ActorId &reference_actor_id, const ActorId &other_actor_id) const {
 
-  const ActorId reference_actor_id = reference_actor->GetId();
-  const ActorId other_actor_id = other_actor->GetId();
   bool avoid_collision = true;
 
   if (ignore_collision.Contains(reference_actor_id) &&
@@ -168,9 +163,8 @@ bool Parameters::GetCollisionDetection(const ActorPtr &reference_actor, const Ac
   return avoid_collision;
 }
 
-ChangeLaneInfo Parameters::GetForceLaneChange(const ActorPtr &actor) {
+ChangeLaneInfo Parameters::GetForceLaneChange(const ActorId &actor_id) {
 
-  const ActorId actor_id = actor->GetId();
   ChangeLaneInfo change_lane_info;
 
   if (force_lane_change.Contains(actor_id)) {
@@ -182,9 +176,8 @@ ChangeLaneInfo Parameters::GetForceLaneChange(const ActorPtr &actor) {
   return change_lane_info;
 }
 
-float Parameters::GetKeepRightPercentage(const ActorPtr &actor) {
+float Parameters::GetKeepRightPercentage(const ActorId &actor_id) {
 
-  const ActorId actor_id = actor->GetId();
   float percentage = -1.0f;
 
   if (perc_keep_right.Contains(actor_id)) {
@@ -196,9 +189,8 @@ float Parameters::GetKeepRightPercentage(const ActorPtr &actor) {
   return percentage;
 }
 
-bool Parameters::GetAutoLaneChange(const ActorPtr &actor) const {
+bool Parameters::GetAutoLaneChange(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   bool auto_lane_change_policy = true;
 
   if (auto_lane_change.Contains(actor_id)) {
@@ -208,9 +200,8 @@ bool Parameters::GetAutoLaneChange(const ActorPtr &actor) const {
   return auto_lane_change_policy;
 }
 
-float Parameters::GetDistanceToLeadingVehicle(const ActorPtr &actor) const {
+float Parameters::GetDistanceToLeadingVehicle(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   float specific_distance_margin = 0.0f;
   if (distance_to_leading_vehicle.Contains(actor_id)) {
     specific_distance_margin = distance_to_leading_vehicle.GetValue(actor_id);
@@ -221,9 +212,8 @@ float Parameters::GetDistanceToLeadingVehicle(const ActorPtr &actor) const {
   return specific_distance_margin;
 }
 
-float Parameters::GetPercentageRunningLight(const ActorPtr &actor) const {
+float Parameters::GetPercentageRunningLight(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   float percentage = 0.0f;
 
   if (perc_run_traffic_light.Contains(actor_id)) {
@@ -233,9 +223,8 @@ float Parameters::GetPercentageRunningLight(const ActorPtr &actor) const {
   return percentage;
 }
 
-float Parameters::GetPercentageRunningSign(const ActorPtr &actor) const {
+float Parameters::GetPercentageRunningSign(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   float percentage = 0.0f;
 
   if (perc_run_traffic_sign.Contains(actor_id)) {
@@ -245,9 +234,8 @@ float Parameters::GetPercentageRunningSign(const ActorPtr &actor) const {
   return percentage;
 }
 
-float Parameters::GetPercentageIgnoreWalkers(const ActorPtr &actor) const {
+float Parameters::GetPercentageIgnoreWalkers(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   float percentage = 0.0f;
 
   if (perc_ignore_walkers.Contains(actor_id)) {
@@ -257,9 +245,8 @@ float Parameters::GetPercentageIgnoreWalkers(const ActorPtr &actor) const {
   return percentage;
 }
 
-float Parameters::GetPercentageIgnoreVehicles(const ActorPtr &actor) const {
+float Parameters::GetPercentageIgnoreVehicles(const ActorId &actor_id) const {
 
-  const ActorId actor_id = actor->GetId();
   float percentage = 0.0f;
 
   if (perc_ignore_vehicles.Contains(actor_id)) {

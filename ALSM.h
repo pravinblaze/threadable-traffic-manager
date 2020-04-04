@@ -12,9 +12,12 @@
 #include "carla/client/Actor.h"
 #include "carla/client/ActorList.h"
 #include "carla/client/Client.h"
+#include "carla/client/Vehicle.h"
+#include "carla/client/Walker.h"
 #include "carla/client/World.h"
 #include "carla/Memory.h"
 #include "carla/rpc/ActorId.h"
+#include "boost/pointer_cast.hpp"
 
 #include "AtomicActorSet.h"
 #include "DataStructures.h"
@@ -48,7 +51,7 @@ using BufferMap = std::unordered_map<carla::ActorId, Buffer>;
 using BufferMapPtr = std::shared_ptr<BufferMap>;
 using LaneChangeLocationMap = std::unordered_map<ActorId, cg::Location>;
 using KinematicStateMap = std::unordered_map<ActorId, KinematicState>;
-using StaticAttributeMap = std::unordered_map<ActorId, StaticVehicleAttributes>;
+using StaticAttributeMap = std::unordered_map<ActorId, StaticAttributes>;
 using IdToIndexMap = std::unordered_map<ActorId, unsigned long>;
 using LocalMapPtr = std::shared_ptr<InMemoryMap>;
 using TimePoint = chr::time_point<chr::system_clock, chr::nanoseconds>;
@@ -187,14 +190,15 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
       const auto type = iter->second->GetTypeId();
 
       SimpleWaypointPtr nearest_waypoint = nullptr;
-      if (type[0] == 'v')
+      if (type.front() == 'v')
       {
         nearest_waypoint = local_map->GetWaypointInVicinity(location);
       }
-      else if (type[0] == 'w')
+      else if (type.front() == 'w')
       {
         nearest_waypoint = local_map->GetPedWaypoint(location);
       }
+
       if (nearest_waypoint == nullptr)
       {
         nearest_waypoint = local_map->GetWaypoint(location);
@@ -237,7 +241,7 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     }
   }
 
-  // Update kinematic state for all registered vehicles.
+  // Update kinematic state and static attributes for all registered vehicles.
   for (const Actor &vehicle : vehicle_list)
   {
 
@@ -245,6 +249,16 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     cg::Transform vehicle_transform = vehicle->GetTransform();
     cg::Location vehicle_location = vehicle_transform.location;
     cg::Rotation vehicle_rotation = vehicle_transform.rotation;
+
+    // Update static attribute map if entry not present.
+    if (static_attribute_map.find(actor_id) == static_attribute_map.end())
+    {
+      auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(vehicle);
+      cg::Vector3D dimensions = vehicle_ptr->GetBoundingBox().extent;
+      static_attribute_map.insert({actor_id, {ActorType::Vehicle,
+                                              dimensions.x, dimensions.y, dimensions.z,
+                                              vehicle_ptr->GetSpeedLimit()}});
+    }
 
     // Adding entry if not present.
     if (kinematic_state_map.find(actor_id) == kinematic_state_map.end())
@@ -284,7 +298,50 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     kinematic_state_map.at(actor_id).location = vehicle_location;
   }
 
-  // TODO: Updating kinematic state for unregistered vehicles.
+  // Update kinematic state and static attributes for unregistered actors.
+  for (auto &unregistered_actor: unregistered_actors)
+  {
+    const ActorId actor_id = unregistered_actor.first;
+    const ActorPtr actor_ptr = unregistered_actor.second;
+    // Update static attribute map if entry not present.
+    if (static_attribute_map.find(actor_id) == static_attribute_map.end())
+    {
+      const std::string type_id = actor_ptr->GetTypeId();
+      ActorType actor_type;
+      cg::Vector3D dimensions;
+      float speed_limit = -1.0f;
+      if (type_id.front() == 'v')
+      {
+        auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(actor_ptr);
+        dimensions = vehicle_ptr->GetBoundingBox().extent;
+        actor_type = ActorType::Vehicle;
+        speed_limit = vehicle_ptr->GetSpeedLimit();
+      }
+      else if (type_id.front() == 'w')
+      {
+        auto walker_ptr = boost::static_pointer_cast<cc::Walker>(actor_ptr);
+        dimensions = walker_ptr->GetBoundingBox().extent;
+        actor_type = ActorType::Pedestrian;
+      }
+      static_attribute_map.insert({actor_id, {actor_type, dimensions.x, dimensions.y, dimensions.z, speed_limit}});
+    }
+
+    // Update kinematic state for the actor.
+    const cg::Transform actor_transform = actor_ptr->GetTransform();
+    const cg::Location actor_location = actor_transform.location;
+    const cg::Rotation actor_rotation = actor_transform.rotation;
+    const cg::Vector3D actor_velocity = actor_ptr->GetVelocity();
+    const KinematicState kinematic_state = KinematicState{true, actor_location, actor_rotation, actor_velocity};
+    // Adding entry if not present.
+    if (kinematic_state_map.find(actor_id) == kinematic_state_map.end())
+    {
+      kinematic_state_map.insert({actor_id, kinematic_state});
+    }
+    else
+    {
+      kinematic_state_map.at(actor_id) = kinematic_state;
+    }
+  }
 }
 
 } // namespace traffic_manager

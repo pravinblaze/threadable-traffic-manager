@@ -127,7 +127,7 @@ public:
   ///////////////////////////////// GETTERS /////////////////////////////////////
 
   /// Method to query target velocity for a vehicle.
-  float GetVehicleTargetVelocity(const ActorId &actor_id) const;
+  float GetVehicleTargetVelocity(const ActorId &actor_id, const float speed_limit) const;
 
   /// Method to query collision avoidance rule between a pair of vehicles.
   bool GetCollisionDetection(const ActorId &reference_actor_id, const ActorId &other_actor_id) const;

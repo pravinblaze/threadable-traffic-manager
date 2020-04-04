@@ -23,12 +23,15 @@ struct KinematicState
   cg::Vector3D velocity;
 };
 
-struct StaticVehicleAttributes
+enum ActorType {Vehicle, Pedestrian};
+
+struct StaticAttributes
 {
-  std::string type_id;
+  ActorType actor_type;
   float half_length;
   float half_width;
   float half_height;
+  float speed_limit;
 };
 
 }

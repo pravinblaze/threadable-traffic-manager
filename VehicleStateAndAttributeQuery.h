@@ -57,5 +57,16 @@ cg::Vector3D GetVelocity(const KinematicStateMap& state_map, const ActorId actor
     return velocity;
 }
 
+bool IsPhysicsEnabled(const KinematicStateMap& state_map, const ActorId actor_id)
+{
+    bool physics_enabled = true;
+    if (state_map.find(actor_id) != state_map.end())
+    {
+        physics_enabled = state_map.at(actor_id).physics_enabled;
+    }
+
+    return physics_enabled;
+}
+
 } // namespace traffic_manager
 } // namespace carla
