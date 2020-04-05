@@ -12,32 +12,34 @@
 #include "carla/client/Actor.h"
 #include "carla/client/ActorList.h"
 #include "carla/client/Client.h"
+#include "carla/client/Timestamp.h"
 #include "carla/client/Vehicle.h"
 #include "carla/client/Walker.h"
 #include "carla/client/World.h"
 #include "carla/Memory.h"
 #include "carla/rpc/ActorId.h"
+#include "carla/rpc/TrafficLightState.h"
 #include "boost/pointer_cast.hpp"
 
 #include "AtomicActorSet.h"
+#include "Constants.h"
 #include "DataStructures.h"
 #include "InMemoryMap.h"
 #include "LocalizationUtils.h"
 #include "SimpleWaypoint.h"
+#include "VehicleStateAndAttributeQuery.h"
 
 #include "Parameters.h"
+
+#define SQUARE(a) a * a
 
 namespace carla
 {
 namespace traffic_manager
 {
 
-namespace ALSMConstants
-{
-static const float HYBRID_MODE_DT = 0.05f;
-static const float PHYSICS_RADIUS = 50.0f;
-} // namespace ALSMConstants
-using namespace ALSMConstants;
+using namespace constants::HybridMode;
+using namespace constants::VehicleRemoval;
 
 namespace cg = carla::geom;
 namespace cc = carla::client;
@@ -49,26 +51,29 @@ using ActorList = carla::SharedPtr<cc::ActorList>;
 using Buffer = std::deque<std::shared_ptr<SimpleWaypoint>>;
 using BufferMap = std::unordered_map<carla::ActorId, Buffer>;
 using BufferMapPtr = std::shared_ptr<BufferMap>;
-using LaneChangeLocationMap = std::unordered_map<ActorId, cg::Location>;
 using KinematicStateMap = std::unordered_map<ActorId, KinematicState>;
 using StaticAttributeMap = std::unordered_map<ActorId, StaticAttributes>;
+using TrafficLightStateMap = std::unordered_map<ActorId, TrafficLightState>;
+using LaneChangeLocationMap = std::unordered_map<ActorId, cg::Location>;
+using IdleTimeMap = std::unordered_map<ActorId, double>;
 using IdToIndexMap = std::unordered_map<ActorId, unsigned long>;
 using LocalMapPtr = std::shared_ptr<InMemoryMap>;
 using TimePoint = chr::time_point<chr::system_clock, chr::nanoseconds>;
+using TLS = carla::rpc::TrafficLightState;
 
 void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
-                                      std::vector<ActorPtr> &vehicle_list,
+                                      std::vector<ActorId> &vehicle_id_list,
                                       ActorMap &unregistered_actors,
-                                      int &registered_vehicles_state,
-                                      IdToIndexMap &vehicle_id_to_index_map,
+                                      const int &registered_vehicles_state,
                                       BufferMapPtr &buffer_map_ptr,
                                       TrackTraffic &track_traffic,
-                                      std::unordered_map<ActorId, double> &idle_time,
+                                      IdleTimeMap &idle_time,
                                       ActorPtr &hero_vehicle,
                                       LaneChangeLocationMap &last_lane_change_location,
                                       KinematicStateMap &kinematic_state_map,
                                       StaticAttributeMap &static_attribute_map,
-                                      TimePoint previous_update_instance,
+                                      TrafficLightStateMap &tls_map,
+                                      float elapsed_last_actor_destruction,
                                       const Parameters &parameters,
                                       const cc::World &world,
                                       const LocalMapPtr &local_map)
@@ -79,9 +84,9 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
   bool is_deleted_actors_present = false;
   std::set<unsigned int> world_vehicle_ids;
   std::set<unsigned int> world_pedestrian_ids;
-  std::vector<ActorId> registered_list_to_be_deleted;
   std::vector<ActorId> unregistered_list_to_be_deleted;
 
+  const cc::Timestamp current_timestamp = world.GetSnapshot().GetTimestamp();
   ActorList world_actors = world.GetActors();
   ActorList world_vehicles = world_actors->Filter("vehicle.*");
   ActorList world_pedestrians = world_actors->Filter("walker.*");
@@ -135,45 +140,34 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     hero_vehicle = nullptr;
   }
 
+  bool vehicles_unregistered = false;
   // Search for invalid/destroyed registered vehicles.
-  for (auto &actor : vehicle_list)
+  for (const auto &deletion_id : vehicle_id_list)
   {
-    ActorId deletion_id = actor->GetId();
     if (world_vehicle_ids.find(deletion_id) == world_vehicle_ids.end())
     {
-      registered_list_to_be_deleted.push_back(deletion_id);
-      track_traffic.DeleteActor(deletion_id);
-      last_lane_change_location.erase(deletion_id);
-      kinematic_state_map.erase(deletion_id);
-      static_attribute_map.erase(deletion_id);
-      idle_time.erase(deletion_id);
+      RemoveActor(deletion_id,
+                  registered_vehicles,
+                  track_traffic,
+                  unregistered_actors,
+                  buffer_map_ptr,
+                  kinematic_state_map,
+                  static_attribute_map,
+                  tls_map,
+                  last_lane_change_location);
+      if (!vehicles_unregistered) {
+        vehicles_unregistered = true;
+      }
     }
-  }
-
-  // Clearing the registered actor list.
-  if (!registered_list_to_be_deleted.empty())
-  {
-    registered_vehicles.Remove(registered_list_to_be_deleted);
-    vehicle_list.clear();
-    vehicle_list = registered_vehicles.GetList();
-    is_deleted_actors_present = true;
   }
 
   // Building a list of registered actors and connecting
   // the vehicle ids to their position indices on data arrays.
-  if (is_deleted_actors_present || (registered_vehicles_state != registered_vehicles.GetState()))
+  if (vehicles_unregistered || (registered_vehicles_state != registered_vehicles.GetState()))
   {
-    vehicle_list.clear();
-    registered_list_to_be_deleted.clear();
-    vehicle_list = registered_vehicles.GetList();
-    uint64_t index = 0u;
-    vehicle_id_to_index_map.clear();
-    for (auto &actor : vehicle_list)
-    {
-      vehicle_id_to_index_map.insert({actor->GetId(), index});
-      ++index;
-    }
-    registered_vehicles_state = registered_vehicles.GetState();
+    vehicle_id_list.clear();
+    vehicle_id_list = registered_vehicles.GetIDList();
+    is_deleted_actors_present = true;
   }
 
   // Regularly update unregistered actor states and clean up any invalid actors.
@@ -211,10 +205,15 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
   // Removing invalid/destroyed unregistered actors.
   for (auto deletion_id : unregistered_list_to_be_deleted)
   {
-    unregistered_actors.erase(deletion_id);
-    track_traffic.DeleteActor(deletion_id);
-    kinematic_state_map.erase(deletion_id);
-    static_attribute_map.erase(deletion_id);
+    RemoveActor(deletion_id,
+                registered_vehicles,
+                track_traffic,
+                unregistered_actors,
+                buffer_map_ptr,
+                kinematic_state_map,
+                static_attribute_map,
+                tls_map,
+                last_lane_change_location);
   }
 
   // Location of hero vehicle if present.
@@ -224,24 +223,10 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     hero_location = hero_vehicle->GetLocation();
   }
 
-  // Using (1/20)s time delta for computing velocity.
+  // Update dynamic state and static attributes for all registered vehicles.
   float dt = HYBRID_MODE_DT;
-  // Skipping velocity update if elapsed time is less than 0.05s in asynchronous, hybrid mode.
-  if (!parameters.GetSynchronousMode())
-  {
-    TimePoint current_instance = chr::system_clock::now();
-    chr::duration<float> elapsed_time = current_instance - previous_update_instance;
-    if (elapsed_time.count() > dt)
-    {
-      previous_update_instance = current_instance;
-    }
-    else if (hybrid_physics_mode)
-    {
-      return;
-    }
-  }
-
-  // Update kinematic state and static attributes for all registered vehicles.
+  std::pair<ActorId, double> max_idle_time = std::make_pair(0u, current_timestamp.elapsed_seconds);
+  std::vector<ActorPtr> vehicle_list = registered_vehicles.GetList();
   for (const Actor &vehicle : vehicle_list)
   {
 
@@ -250,14 +235,28 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     cg::Location vehicle_location = vehicle_transform.location;
     cg::Rotation vehicle_rotation = vehicle_transform.rotation;
 
+    // Initializing idle times.
+    if (idle_time.find(actor_id) == idle_time.end() && current_timestamp.elapsed_seconds != 0) {
+      idle_time.insert({actor_id, current_timestamp.elapsed_seconds});
+    }
+
+    auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(vehicle);
+
     // Update static attribute map if entry not present.
     if (static_attribute_map.find(actor_id) == static_attribute_map.end())
     {
-      auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(vehicle);
       cg::Vector3D dimensions = vehicle_ptr->GetBoundingBox().extent;
       static_attribute_map.insert({actor_id, {ActorType::Vehicle,
                                               dimensions.x, dimensions.y, dimensions.z,
                                               vehicle_ptr->GetSpeedLimit()}});
+    }
+
+    // Update traffic light state.
+    TrafficLightState tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
+    if (tls_map.find(actor_id) == tls_map.end()) {
+      tls_map.insert({actor_id, tl_state});
+    } else {
+      tls_map.at(actor_id) = tl_state;
     }
 
     // Adding entry if not present.
@@ -269,7 +268,7 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     // Check if current actor is in range of hero actor and enable physics in hybrid mode.
     bool in_range_of_hero_actor = false;
     if (hybrid_physics_mode && hero_vehicle != nullptr
-        && (cg::Math::DistanceSquared(vehicle_location, hero_location) < std::pow(PHYSICS_RADIUS, 2)))
+        && (cg::Math::DistanceSquared(vehicle_location, hero_location) < SQUARE(PHYSICS_RADIUS)))
     {
       in_range_of_hero_actor = true;
     }
@@ -282,12 +281,10 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     cg::Vector3D heading = vehicle->GetTransform().GetForwardVector();
     if (enable_physics)
     {
-
       kinematic_state_map.at(actor_id).velocity = cg::Math::Dot(vehicle->GetVelocity(), heading) * heading;
     }
     else
     {
-
       cg::Vector3D displacement = (vehicle_location - kinematic_state_map.at(actor_id).location);
       cg::Vector3D displacement_along_heading = cg::Math::Dot(displacement, heading) * heading;
       cg::Vector3D velocity = displacement_along_heading / dt;
@@ -296,6 +293,23 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
 
     // Updating location after velocity is computed.
     kinematic_state_map.at(actor_id).location = vehicle_location;
+
+    // Updating idle time when necessary.
+    UpdateIdleTime(idle_time, max_idle_time, actor_id, kinematic_state_map, tls_map, current_timestamp);
+  }
+
+  if (IsVehicleStuck(idle_time, max_idle_time.first, current_timestamp)
+      && current_timestamp.elapsed_seconds - elapsed_last_actor_destruction > DELTA_TIME_BETWEEN_DESTRUCTIONS) {
+    RemoveActor(max_idle_time.first,
+                registered_vehicles,
+                track_traffic,
+                unregistered_actors,
+                buffer_map_ptr,
+                kinematic_state_map,
+                static_attribute_map,
+                tls_map,
+                last_lane_change_location);
+    elapsed_last_actor_destruction = current_timestamp.elapsed_seconds;
   }
 
   // Update kinematic state and static attributes for unregistered actors.
@@ -316,6 +330,14 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
         dimensions = vehicle_ptr->GetBoundingBox().extent;
         actor_type = ActorType::Vehicle;
         speed_limit = vehicle_ptr->GetSpeedLimit();
+
+        // Update traffic light state.
+        TrafficLightState tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
+        if (tls_map.find(actor_id) == tls_map.end()) {
+          tls_map.insert({actor_id, tl_state});
+        } else {
+          tls_map.at(actor_id) = tl_state;
+        }
       }
       else if (type_id.front() == 'w')
       {
@@ -341,6 +363,72 @@ void AgentLifecycleAndStateManagement(AtomicActorSet &registered_vehicles,
     {
       kinematic_state_map.at(actor_id) = kinematic_state;
     }
+  }
+}
+
+void UpdateIdleTime(IdleTimeMap& idle_time,
+                    std::pair<ActorId, double>& max_idle_time,
+                    const ActorId& actor_id,
+                    const KinematicStateMap &kinematic_state_map,
+                    const TrafficLightStateMap &tl_state_map,
+                    const cc::Timestamp &current_timestamp)
+{
+  if (idle_time.find(actor_id) != idle_time.end()) {
+    TrafficLightState tl_state = GetTLS(tl_state_map, actor_id);
+    if (GetVelocity(kinematic_state_map, actor_id).Length() > STOPPED_VELOCITY_THRESHOLD
+        || (tl_state.at_traffic_light && tl_state.tl_state != TLS::Green)) {
+      idle_time[actor_id] = current_timestamp.elapsed_seconds;
+    }
+
+    // Checking maximum idle time.
+    if (max_idle_time.first == 0u || max_idle_time.second > idle_time[actor_id]) {
+      max_idle_time = std::make_pair(actor_id, idle_time[actor_id]);
+    }
+  }
+}
+
+bool IsVehicleStuck(const IdleTimeMap& idle_time, const ActorId& actor_id, const cc::Timestamp &current_timestamp)
+{
+  if (idle_time.find(actor_id) != idle_time.end()) {
+    auto delta_idle_time = current_timestamp.elapsed_seconds - idle_time.at(actor_id);
+    if (delta_idle_time >= BLOCKED_TIME_THRESHOLD) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void RemoveActor(const ActorId actor_id,
+                 AtomicActorSet &registered_actors,
+                 TrackTraffic &track_traffic,
+                 ActorMap &unregistered_actors,
+                 BufferMapPtr &buffer_map_ptr,
+                 KinematicStateMap &kinematic_state_map,
+                 StaticAttributeMap &attribute_map,
+                 TrafficLightStateMap &tl_state_map,
+                 LaneChangeLocationMap &lane_change_location_map)
+{
+  bool is_registered_actor = registered_actors.Contains(actor_id);
+  bool is_unregistered_actor = unregistered_actors.find(actor_id) != unregistered_actors.end();
+
+  if (is_registered_actor)
+  {
+    registered_actors.Remove({actor_id});
+    buffer_map_ptr->erase(actor_id);
+    lane_change_location_map.erase(actor_id);
+  }
+
+  if (is_unregistered_actor)
+  {
+    unregistered_actors.erase(actor_id);
+  }
+
+  if (is_registered_actor || is_unregistered_actor)
+  {
+    track_traffic.DeleteActor(actor_id);
+    kinematic_state_map.erase(actor_id);
+    attribute_map.erase(actor_id);
+    tl_state_map.erase(actor_id);
   }
 }
 

@@ -12,6 +12,7 @@ namespace traffic_manager
 
 using ActorId = carla::rpc::ActorId;
 using KinematicStateMap = std::unordered_map<ActorId, KinematicState>;
+using TrafficLightStateMap = std::unordered_map<ActorId, TrafficLightState>;
 
 cg::Location GetLocation(const KinematicStateMap& state_map, const ActorId actor_id)
 {
@@ -66,6 +67,16 @@ bool IsPhysicsEnabled(const KinematicStateMap& state_map, const ActorId actor_id
     }
 
     return physics_enabled;
+}
+
+TrafficLightState GetTLS(const TrafficLightStateMap& tl_state_map, const ActorId actor_id) {
+
+    TrafficLightState tl_state;
+    if (tl_state_map.find(actor_id) != tl_state_map.end()) {
+        tl_state = tl_state_map.at(actor_id);
+    }
+
+    return tl_state;
 }
 
 } // namespace traffic_manager

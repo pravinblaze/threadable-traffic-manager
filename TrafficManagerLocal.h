@@ -31,12 +31,15 @@
 #include "carla/client/Map.h"
 #include "carla/client/TrafficLight.h"
 #include "carla/client/World.h"
+#include "carla/rpc/Command.h"
 
 #include "ALSM.h"
 #include "AtomicActorSet.h"
 #include "AtomicMap.h"
+#include "DataStructures.h"
 #include "InMemoryMap.h"
 #include "Parameters.h"
+#include "Localization.h"
 #include "LocalizationUtils.h"
 
 // TODO: Import these files from local folder.
@@ -49,6 +52,12 @@ namespace traffic_manager {
   using TimePoint = chr::time_point<chr::system_clock, chr::nanoseconds>;
   using TLS = carla::rpc::TrafficLightState;
   using TLGroup = std::vector<carla::SharedPtr<carla::client::TrafficLight>>;
+  using CollisionFrame = std::vector<CollisionHazardData>;
+  using CollisionFramePtr = std::shared_ptr<CollisionFrame>;
+  using TLFrame = std::vector<bool>;
+  using TLFramePtr = std::shared_ptr<TLFrame>;
+  using ControlFrame = std::vector<carla::rpc::Command>;
+  using ControlFramePtr = std::shared_ptr<ControlFrame>;
 
   /// The function of this class is to integrate all the various stages of
   /// the traffic manager appropriately using messengers.
@@ -57,7 +66,7 @@ namespace traffic_manager {
   private:
 
     /// Carla's client connection object.
-    carla::client::detail::EpisodeProxy episodeProxyTM;
+    carla::client::detail::EpisodeProxy episode_proxy;
     /// Carla client and object.
     const cc::World world;
     /// PID controller parameters.
@@ -69,13 +78,10 @@ namespace traffic_manager {
     AtomicActorSet registered_vehicles;
     /// State counter to track changes in registered actors.
     int registered_vehicles_state;
-    /// Map connecting actor ids to indices of data arrays.
-    std::unordered_map<ActorId, unsigned long> vehicle_id_to_index;
     /// List of vehicles registered with the traffic manager in
     /// current update cycle.
-    std::vector<ActorPtr> vehicle_list;
-    /// A structure used to keep track of actors spawned outside of traffic
-    /// manager.
+    std::vector<ActorId> vehicle_id_list;
+    /// A structure used to keep track of actors spawned outside of traffic manager.
     std::unordered_map<ActorId, ActorPtr> unregistered_actors;
     /// Pointer to local map cache.
     LocalMapPtr local_map;
@@ -97,6 +103,8 @@ namespace traffic_manager {
     KinematicStateMap kinematic_state_map;
     /// Structure to hold static attributes of vehicles.
     StaticAttributeMap static_attribute_map;
+    /// Structure to hold traffic light states for all vehicles.
+    TrafficLightStateMap tl_state_map;
     /// Time instance used to calculate dt in asynchronous mode.
     TimePoint previous_update_instance;
     /// Carla's debug helper object.
@@ -118,7 +126,12 @@ namespace traffic_manager {
     std::condition_variable step_complete_trigger;
     /// Single worker thread for sequential execution of sub-components.
     std::unique_ptr<std::thread> worker_thread;
-
+    /// Array to hold output data of collision avoidance.
+    CollisionFramePtr collision_frame_ptr;
+    /// Array to hold output data of traffic light response.
+    TLFramePtr tl_frame_ptr;
+    /// Array to hold output data of motion planning.
+    ControlFramePtr control_frame_ptr;
     /// Method to check if all traffic lights are frozen in a group.
     bool CheckAllFrozen(TLGroup tl_to_freeze);
 
@@ -130,7 +143,7 @@ namespace traffic_manager {
                         std::vector<float> lateral_PID_parameters,
                         std::vector<float> lateral_highway_PID_parameters,
                         float perc_decrease_from_limit,
-                        cc::detail::EpisodeProxy& episodeProxy,
+                        cc::detail::EpisodeProxy& episode_proxy,
                         uint16_t &RPCportTM);
 
     /// Destructor.

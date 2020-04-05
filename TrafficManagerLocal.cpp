@@ -9,27 +9,34 @@
 namespace carla {
 namespace traffic_manager {
 
+using namespace constants::FrameMemory;
+
 TrafficManagerLocal::TrafficManagerLocal(
     std::vector<float> longitudinal_PID_parameters,
     std::vector<float> longitudinal_highway_PID_parameters,
     std::vector<float> lateral_PID_parameters,
     std::vector<float> lateral_highway_PID_parameters,
     float perc_difference_from_limit,
-    cc::detail::EpisodeProxy& episodeProxy,
+    cc::detail::EpisodeProxy& episode_proxy,
     uint16_t& RPCportTM)
-  : episodeProxyTM(episodeProxy),
-    world(cc::World(episodeProxyTM)),
+  : episode_proxy(episode_proxy),
+    world(cc::World(episode_proxy)),
     longitudinal_PID_parameters(longitudinal_PID_parameters),
     longitudinal_highway_PID_parameters(longitudinal_highway_PID_parameters),
     lateral_PID_parameters(lateral_PID_parameters),
     lateral_highway_PID_parameters(lateral_highway_PID_parameters),
-    debug_helper(carla::client::DebugHelper{episodeProxyTM}),
+    debug_helper(world.MakeDebugHelper()),
     server(TrafficManagerServer(RPCportTM, static_cast<carla::traffic_manager::TrafficManagerBase *>(this))) {
 
   parameters.SetGlobalPercentageSpeedDifference(perc_difference_from_limit);
 
   registered_vehicles_state = -1;
+
   buffer_map = std::make_shared<BufferMap>();
+
+  collision_frame_ptr = std::make_shared<CollisionFrame>(INITIAL_SIZE);
+  tl_frame_ptr = std::make_shared<TLFrame>(INITIAL_SIZE);
+  control_frame_ptr = std::make_shared<ControlFrame>(INITIAL_SIZE);
 
   SetupLocalMap();
 
@@ -37,7 +44,7 @@ TrafficManagerLocal::TrafficManagerLocal(
 }
 
 TrafficManagerLocal::~TrafficManagerLocal() {
-  episodeProxyTM.Lock()->DestroyTrafficManager(server.port());
+  episode_proxy.Lock()->DestroyTrafficManager(server.port());
   Release();
 }
 
@@ -65,11 +72,64 @@ void TrafficManagerLocal::Run() {
       step_begin.store(false);
     }
 
-    AgentLifecycleAndStateManagement(registered_vehicles, vehicle_list, unregistered_actors,
-                                     registered_vehicles_state, vehicle_id_to_index, buffer_map,
-                                     track_traffic, idle_time, hero_vehicle, last_lane_change_location,
-                                     kinematic_state_map, static_attribute_map, previous_update_instance,
-                                     parameters, world, local_map);
+    // Skipping velocity update if elapsed time is less than 0.05s in asynchronous, hybrid mode.
+    if (!parameters.GetSynchronousMode())
+    {
+      TimePoint current_instance = chr::system_clock::now();
+      chr::duration<float> elapsed_time = current_instance - previous_update_instance;
+      // TODO: move all constants to one file.
+      if (elapsed_time.count() > 0.05) // HYBRID_MODE_DT
+      {
+        previous_update_instance = current_instance;
+      }
+      else if (hybrid_physics_mode)
+      {
+        continue;
+      }
+    }
+
+    AgentLifecycleAndStateManagement(registered_vehicles,
+                                     vehicle_id_list,
+                                     unregistered_actors,
+                                     registered_vehicles_state,
+                                     buffer_map,
+                                     track_traffic,
+                                     idle_time,
+                                     hero_vehicle,
+                                     last_lane_change_location,
+                                     kinematic_state_map,
+                                     static_attribute_map,
+                                     tl_state_map,
+                                     elapsed_last_actor_destruction,
+                                     parameters,
+                                     world,
+                                     local_map);
+
+    int current_registered_vehicles_state = registered_vehicles.GetState();
+    unsigned long number_of_vehicles = vehicle_id_list.size();
+    if (registered_vehicles_state != current_registered_vehicles_state){
+
+      unsigned int new_frame_size = INITIAL_SIZE + GROWTH_STEP_SIZE * (number_of_vehicles / GROWTH_STEP_SIZE);
+      if (new_frame_size != control_frame_ptr->size())
+      {
+        collision_frame_ptr = std::make_shared<CollisionFrame>(new_frame_size);
+        tl_frame_ptr = std::make_shared<TLFrame>(new_frame_size);
+        control_frame_ptr = std::make_shared<ControlFrame>(new_frame_size);
+      }
+      registered_vehicles_state = registered_vehicles.GetState();
+    }
+
+    for (unsigned long index = 0u; index < vehicle_id_list.size(); ++index)
+    {
+      Localization(index,
+                   vehicle_id_list,
+                   buffer_map,
+                   kinematic_state_map,
+                   track_traffic,
+                   local_map,
+                   parameters,
+                   last_lane_change_location);
+    }
 
     // Wait for external trigger to complete cycle in synchronous mode.
     if (sync_mode) {
@@ -97,7 +157,7 @@ void TrafficManagerLocal::Stop() {
 void TrafficManagerLocal::Reset() {
 
   Stop();
-  episodeProxyTM = episodeProxyTM.Lock()->GetCurrentEpisode();
+  episode_proxy = episode_proxy.Lock()->GetCurrentEpisode();
   SetupLocalMap();
   Start();
 }
@@ -202,7 +262,7 @@ void TrafficManagerLocal::ResetAllTrafficLights() {
   };
 
   // Get all actors of the world.
-  auto world_actorsList = episodeProxyTM.Lock()->GetAllTheActorsInTheEpisode();
+  auto world_actorsList = episode_proxy.Lock()->GetAllTheActorsInTheEpisode();
 
   // Filter based on wildcard pattern.
   const auto world_traffic_lights = Filter(world_actorsList, "*traffic_light*");
@@ -212,7 +272,7 @@ void TrafficManagerLocal::ResetAllTrafficLights() {
   std::vector<carla::ActorId> list_of_ids;
   for (auto tl : world_traffic_lights) {
     if (!(std::find(list_of_ids.begin(), list_of_ids.end(), tl.GetId()) != list_of_ids.end())) {
-      const TLGroup tl_group = boost::static_pointer_cast<cc::TrafficLight>(tl.Get(episodeProxyTM))->GetGroupTrafficLights();
+      const TLGroup tl_group = boost::static_pointer_cast<cc::TrafficLight>(tl.Get(episode_proxy))->GetGroupTrafficLights();
       list_of_all_groups.push_back(tl_group);
       for (uint64_t i=0u; i<tl_group.size(); i++) {
         list_of_ids.push_back(tl_group.at(i).get()->GetId());
@@ -248,7 +308,7 @@ void TrafficManagerLocal::SetSynchronousModeTimeOutInMiliSecond(double time) {
 }
 
 carla::client::detail::EpisodeProxy& TrafficManagerLocal::GetEpisodeProxy() {
-  return episodeProxyTM;
+  return episode_proxy;
 }
 
 std::vector<ActorId> TrafficManagerLocal::GetRegisteredVehiclesIDs() {
